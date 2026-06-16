@@ -100,12 +100,12 @@ class LocalAgent:
             f"Current working directory: {self.cwd}\n\n"
             f"{plan_rules}"
             "RECOMMENDED WORKFLOW:\n"
-            "When executing complex tasks, modifications, or code edits, adopt the following systematic workflow:\n"
+            "When executing complex tasks, modifications, or code edits, adopt the following systematic workflow (ReAct):\n"
             "1. Plan & Understand: Fully understand the user's goals. Outline the plan and architectural changes before modifying anything.\n"
             "2. Read & Analyze: Read files, inspect codebases, and gather necessary context using files/directories lookup or web searches.\n"
             "3. Ask & Align: If requirements are ambiguous or critical trade-offs exist, present option-based questions to align with the user.\n"
             "4. Code & Edit: Perform exact drop-in code modifications or writes once aligned.\n"
-            "5. Test & Verify: Execute compile, test, or verification commands to confirm correctness.\n\n"
+            "5. Test & Verify: Execute compile, test, or verification commands to confirm correctness. If a command fails, diagnose the error and try to fix it.\n\n"
             "IMPORTANT RULES:\n"
             "- You operate in a fully user-supervised environment. EVERY single tool execution you request is paused and shown to the user, who must manually review and type 'y' or click 'Approve' to allow it to run. Because of this, it is entirely safe and encouraged for you to suggest command executions. You will not cause damage because the user acts as your safety gatekeeper.\n"
             "- When asked for information that requires local system state or network lookup (e.g., local/public IP, hostname, disk usage, active network interfaces, etc.), you MUST execute the command yourself via 'run_command' (e.g., 'ip route' or 'curl -s ifconfig.me') to retrieve the live data instead of telling the user to run it.\n"
@@ -118,18 +118,22 @@ class LocalAgent:
             "TOOL USE & WEB SEARCH GUIDELINES:\n"
             "- When asked to search the web, get docs, look up libraries, find answers, or check external info, you MUST use the corresponding search/fetch tool or use `run_command` (e.g., with curl or python scripts) if no dedicated search tool is active. Never state that you lack internet access; always try to retrieve the information using tools.\n"
             "- To perform any action (such as modifying files, listing directories, executing shell commands, or retrieving web content), you must invoke the appropriate tool rather than explaining to the user how they should do it.\n"
-            "- Prefer gathering information and executing actions yourself over requesting the user to perform tasks or give you the info.\n\n"
+            "- Prefer gathering information and executing actions yourself over requesting the user to perform tasks or give you the info.\n"
+            "- ALWAYS list directories (`list_dir`) before trying to read a file if you are unsure of the exact path.\n"
+            "- If a tool call fails, analyze the error and try a different approach (e.g. if reading a file fails because it doesn't exist, list the directory to find it).\n\n"
             "Available tools (respond with a JSON object to call one):\n"
             f"{core_tools_str}"
             f"{mcp_tools_str}\n"
-            "Tool call format (respond with ONLY this JSON, no other text):\n"
+            "TOOL CALL FORMAT:\n"
+            "You MUST use the ReAct format. First output your thoughts in plain text starting with 'Thought: ', followed by the tool call in a markdown JSON block.\n\n"
+            "Example of a tool call:\n"
+            "Thought: I need to check the contents of the current directory to find the app.js file.\n"
+            "```json\n"
             "{\n"
-            "  \"thought\": \"Brief reasoning\",\n"
-            "  \"tool_call\": {\n"
-            "    \"name\": \"<tool_name>\",\n"
-            "    \"arguments\": {}\n"
-            "  }\n"
-            "}\n\n"
+            "  \"name\": \"list_dir\",\n"
+            "  \"arguments\": {\"path\": \".\"}\n"
+            "}\n"
+            "```\n\n"
             "If you do not need to call a tool, just write a normal text response to the user."
         )
         self.conversation_history = [{"role": "system", "content": self.system_prompt}]
@@ -157,22 +161,35 @@ class LocalAgent:
 
     def _parse_tool_call(self, content: str) -> Optional[Dict[str, Any]]:
         """Robustly parse a tool call JSON from model output."""
+        import re
+        thought = ""
+        # Extract thought if present (e.g., "Thought: ...\n```json")
+        thought_match = re.search(r'^(?:Thought:\s*)?(.*?)(?=```json|{)', content, re.IGNORECASE | re.DOTALL)
+        if thought_match:
+            thought = thought_match.group(1).strip()
+
+        def process_parsed(parsed: dict) -> Optional[dict]:
+            if "tool_call" in parsed and "name" in parsed["tool_call"]:
+                return {"thought": thought or parsed.get("thought", ""), "tool_call": parsed["tool_call"]}
+            elif "name" in parsed:
+                return {"thought": thought, "tool_call": {"name": parsed["name"], "arguments": parsed.get("arguments", {})}}
+            return None
+
         # Try 1: strict full parse
         try:
             parsed = json.loads(content)
-            if "tool_call" in parsed and "name" in parsed["tool_call"]:
-                return parsed
+            res = process_parsed(parsed)
+            if res: return res
         except (json.JSONDecodeError, TypeError):
             pass
 
         # Try 2: extract JSON block from markdown code fences
-        import re
         fence_match = re.search(r'```(?:json)?\s*\n?({.*?})\s*\n?```', content, re.DOTALL)
         if fence_match:
             try:
                 parsed = json.loads(fence_match.group(1))
-                if "tool_call" in parsed and "name" in parsed["tool_call"]:
-                    return parsed
+                res = process_parsed(parsed)
+                if res: return res
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -189,8 +206,8 @@ class LocalAgent:
                 if depth == 0 and start != -1:
                     try:
                         parsed = json.loads(content[start:i+1])
-                        if "tool_call" in parsed and "name" in parsed["tool_call"]:
-                            return parsed
+                        res = process_parsed(parsed)
+                        if res: return res
                     except (json.JSONDecodeError, TypeError):
                         pass
                     start = -1
@@ -199,25 +216,40 @@ class LocalAgent:
 
     def run_step(self) -> Dict[str, Any]:
         """Runs a single step of the agent, calling Ollama and parsing the response."""
-        self._trim_history()
-        try:
-            response = ollama.chat(
-                model=self.model_name,
-                messages=self.conversation_history,
-                options={"temperature": 0.1}
-            )
-            content = response.get('message', {}).get('content', '').strip()
+        max_retries = 2
 
-            parsed = self._parse_tool_call(content)
-            if parsed:
-                tool_name = parsed["tool_call"]["name"]
-                # Reject invented tools immediately at the agent level
-                from mcp_client import MCPManager
-                mcp_tools = MCPManager.get_instance().get_all_tools()
-                valid_tools = {"run_command", "read_file", "write_file", "list_dir"}
-                for t in mcp_tools:
-                    valid_tools.add(t.get("name"))
-                if tool_name not in valid_tools:
+        for attempt in range(max_retries + 1):
+            self._trim_history()
+            try:
+                response = ollama.chat(
+                    model=self.model_name,
+                    messages=self.conversation_history,
+                    options={"temperature": 0.1}
+                )
+                content = response.get('message', {}).get('content', '').strip()
+
+                parsed = self._parse_tool_call(content)
+                if parsed:
+                    tool_name = parsed["tool_call"]["name"]
+                    # Reject invented tools immediately at the agent level
+                    from mcp_client import MCPManager
+                    mcp_tools = MCPManager.get_instance().get_all_tools()
+                    valid_tools = {"run_command", "read_file", "write_file", "list_dir"}
+                    for t in mcp_tools:
+                        valid_tools.add(t.get("name"))
+
+                    if tool_name not in valid_tools:
+                        if attempt < max_retries:
+                            self.add_agent_message(content)
+                            self.add_user_message(f"Error: Tool '{tool_name}' is not a valid tool. Please choose from the available tools.")
+                            continue
+                        else:
+                            return {
+                                "type": "error",
+                                "content": f"Agent hallucinates tool '{tool_name}' after retries.",
+                                "raw_response": content
+                            }
+
                     return {
                         "type": "tool_call",
                         "thought": parsed.get("thought", ""),
@@ -225,24 +257,31 @@ class LocalAgent:
                         "arguments": parsed["tool_call"].get("arguments", {}),
                         "raw_response": content
                     }
+
+                # If no valid JSON is found, but it looks like a failed tool call
+                import re
+                if re.search(r'```json', content, re.IGNORECASE) or ('{"name"' in content.replace(" ", "")) or ('{"tool_call"' in content.replace(" ", "")):
+                    if attempt < max_retries:
+                        self.add_agent_message(content)
+                        self.add_user_message("Error: Invalid tool call format. Please respond with valid JSON in the specified ReAct format.")
+                        continue
+                    else:
+                        return {
+                            "type": "error",
+                            "content": "Agent failed to produce valid JSON tool call after retries.",
+                            "raw_response": content
+                        }
+
+                # Normal text response
                 return {
-                    "type": "tool_call",
-                    "thought": parsed.get("thought", ""),
-                    "tool_name": tool_name,
-                    "arguments": parsed["tool_call"].get("arguments", {}),
-                    "raw_response": content
+                    "type": "message",
+                    "content": content
                 }
-
-            return {
-                "type": "message",
-                "content": content
-            }
-        except Exception as e:
-            return {
-                "type": "error",
-                "content": f"Ollama connection error: {str(e)}"
-            }
-
+            except Exception as e:
+                return {
+                    "type": "error",
+                    "content": f"Ollama connection error: {str(e)}"
+                }
 
 # Tool implementation functions
 def run_command(command: str, cwd: Optional[str] = None, timeout: int = 60) -> Dict[str, Any]:
