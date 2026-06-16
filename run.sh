@@ -10,7 +10,7 @@ fi
 # Only run pip install if marker file doesn't exist (first setup)
 if [ ! -f "$MARKER" ]; then
     echo "Installing dependencies..."
-    "$SCRIPT_DIR/.venv/bin/pip" install -q ollama rich prompt-toolkit && touch "$MARKER"
+    "$SCRIPT_DIR/.venv/bin/pip" install -q ollama rich prompt-toolkit schedule plyer && touch "$MARKER"
 fi
 
 # Kill any other running instances of superboof cli.py

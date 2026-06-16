@@ -112,7 +112,7 @@ class SlashCompleter(Completer):
         word_lower = word.lower() if self.ignore_case else word
 
         all_words = list(self.words)
-        core_tools = ["/run_command", "/read_file", "/write_file", "/list_dir"]
+        core_tools = ["/run_command", "/read_file", "/write_file", "/list_dir", "/analyze"]
         for ct in core_tools:
             if ct not in all_words:
                 all_words.append(ct)
@@ -246,8 +246,7 @@ class ChatCLI:
         os.makedirs(os.path.dirname(history_file), exist_ok=True)
 
         completer = SlashCompleter([
-            '/help', '/models', '/m', '/clear', '/exit', '/quit', '/q',
-            '/mcp', '/tools', '/tool', '/t', '/newmodel', '/new', '/n'
+            '/help', '/model', '/clear', '/exit', '/tools', '/info', '/daemon', '/schedule', '/newtask'
         ])
 
         self.session = PromptSession(
@@ -321,6 +320,218 @@ class ChatCLI:
             
         return False
 
+
+    async def _create_new_task(self):
+        """Interactively create a new scheduled task."""
+        schedule_file = os.path.expanduser("~/.config/superboof/schedule.json")
+        console.print("\n[bold cyan]--- Create Scheduled Task ---[/bold cyan]")
+
+        freq_choice = select_option("Frequency:", ["daily", "hourly", "minutely"])
+        if not freq_choice: return
+
+        time_val = None
+        if freq_choice == "daily":
+            time_val = await self.session.prompt_async("Time (HH:MM, e.g. 14:00) [leave blank for any]: ")
+            time_val = time_val.strip() if time_val else None
+
+        prompt = await self.session.prompt_async("Task Prompt/Instruction: ")
+        prompt = prompt.strip()
+        if not prompt:
+            console.print("[red]Task prompt cannot be empty.[/red]")
+            return
+
+        task = {
+            "frequency": freq_choice,
+            "time": time_val,
+            "prompt": prompt
+        }
+
+        try:
+            tasks = []
+            if os.path.exists(schedule_file):
+                with open(schedule_file, 'r') as f:
+                    tasks = json.load(f)
+            tasks.append(task)
+            os.makedirs(os.path.dirname(schedule_file), exist_ok=True)
+            with open(schedule_file, 'w') as f:
+                json.dump(tasks, f, indent=2)
+            console.print(f"[green]Task saved successfully![/green]")
+            console.print(f"Details: {json.dumps(task)}")
+            console.print("[dim]Make sure the daemon is running (`/daemon start`) to execute this task.[/dim]")
+        except Exception as e:
+            console.print(f"[red]Failed to save task: {e}[/red]")
+
+    async def _schedule_natural_language(self, user_text: str):
+        """Use LLM to parse natural language into a schedule JSON."""
+        console.print(f"[dim]Parsing schedule request...[/dim]")
+        system_msg = (
+            "You are a task scheduling assistant. Your job is to convert the user's natural language request "
+            "into a JSON object with strictly these keys:\n"
+            "- \"frequency\": one of [\"daily\", \"hourly\", \"minutely\"]\n"
+            "- \"time\": a string in \"HH:MM\" format, or null if not applicable.\n"
+            "- \"prompt\": a clear, actionable prompt summarizing what needs to be done.\n"
+            "Return ONLY the raw JSON object. Do not use markdown blocks or conversational filler."
+        )
+
+        try:
+            import ollama
+            import config
+            model_name = config.get_last_used_model() or "qwen2.5:7b"
+            res = await asyncio.to_thread(ollama.generate, model=model_name, prompt=user_text, system=system_msg)
+            response_text = res.get('response', '').strip()
+
+            # Remove possible markdown backticks
+            if response_text.startswith("```json"):
+                response_text = response_text[7:]
+            if response_text.startswith("```"):
+                response_text = response_text[3:]
+            if response_text.endswith("```"):
+                response_text = response_text[:-3]
+
+            parsed = json.loads(response_text.strip())
+
+            freq = parsed.get("frequency")
+            t_val = parsed.get("time")
+            prompt = parsed.get("prompt")
+
+            if freq not in ["daily", "hourly", "minutely"]:
+                raise ValueError(f"Invalid frequency parsed: {freq}")
+
+            console.print("\n[bold]Parsed Task Schedule:[/bold]")
+            console.print(f"  [cyan]Frequency:[/cyan] {freq}")
+            console.print(f"  [cyan]Time:[/cyan] {t_val or 'N/A'}")
+            console.print(f"  [cyan]Prompt:[/cyan] {prompt}\n")
+
+            console.print("[yellow]WARNING: This task will run autonomously in the background.[/yellow]")
+            console.print("[yellow]The agent may execute shell commands to accomplish the prompt.[/yellow]\n")
+
+            confirm = select_option("Is this correct? Save task?", ["Yes", "No"])
+            if confirm == "Yes":
+                schedule_file = os.path.expanduser("~/.config/superboof/schedule.json")
+                tasks = []
+                if os.path.exists(schedule_file):
+                    with open(schedule_file, 'r') as f:
+                        tasks = json.load(f)
+                tasks.append(parsed)
+                os.makedirs(os.path.dirname(schedule_file), exist_ok=True)
+                with open(schedule_file, 'w') as f:
+                    json.dump(tasks, f, indent=2)
+                console.print(f"[green]Task scheduled successfully![/green]")
+                console.print("[dim]Make sure the daemon is running (`/daemon start`) to execute this task.[/dim]")
+            else:
+                console.print("[yellow]Task discarded.[/yellow]")
+
+        except Exception as e:
+            console.print(f"[red]Failed to parse schedule: {e}[/red]")
+            console.print("[dim]Please try rephrasing your request or use `/newtask` instead.[/dim]")
+
+    async def _manage_daemon(self, action: str):
+        import subprocess
+
+        systemd_dir = os.path.expanduser("~/.config/systemd/user")
+        service_file = os.path.join(systemd_dir, "superboof-daemon.service")
+
+        daemon_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "daemon.py")
+        venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "python3")
+        if not os.path.exists(venv_python):
+            venv_python = sys.executable
+
+        def is_service_active():
+            try:
+                res = subprocess.run(["systemctl", "--user", "is-active", "superboof-daemon"], capture_output=True, text=True)
+                return res.stdout.strip() == "active"
+            except Exception:
+                return False
+
+        if action == "start":
+            os.makedirs(systemd_dir, exist_ok=True)
+            service_content = f"""[Unit]
+Description=Superboof Background Daemon
+After=network.target
+
+[Service]
+ExecStart={venv_python} {daemon_script}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"""
+            try:
+                with open(service_file, "w") as f:
+                    f.write(service_content)
+                subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+                subprocess.run(["systemctl", "--user", "enable", "superboof-daemon"], check=True)
+                subprocess.run(["systemctl", "--user", "start", "superboof-daemon"], check=True)
+                console.print("[green]Daemon started successfully and enabled to run on boot via systemd.[/green]")
+            except Exception as e:
+                console.print(f"[red]Failed to start/enable systemd service: {e}[/red]")
+
+        elif action == "stop":
+            try:
+                subprocess.run(["systemctl", "--user", "stop", "superboof-daemon"], check=True)
+                subprocess.run(["systemctl", "--user", "disable", "superboof-daemon"], check=True)
+                console.print("[green]Daemon stopped and disabled from running on boot.[/green]")
+            except Exception as e:
+                console.print(f"[red]Failed to stop daemon service: {e}[/red]")
+
+        elif action == "status" or not action:
+            if is_service_active():
+                console.print("[green]Daemon is RUNNING[/green]")
+            else:
+                console.print("[yellow]Daemon is STOPPED[/yellow]")
+        else:
+            console.print("[red]Usage: /daemon [start|stop|status][/red]")
+
+
+    async def _show_info(self):
+        """Show information and metadata about the current active model."""
+        import ollama
+        from rich.panel import Panel
+        from rich.table import Table
+
+        try:
+            info = await asyncio.to_thread(ollama.show, self.agent.model_name)
+
+            details = info.details if hasattr(info, 'details') else info.get('details', {})
+            model_info = info.modelinfo if hasattr(info, 'modelinfo') else info.get('model_info', {})
+
+            # Use getattr for object attributes, or get for dict
+            if isinstance(details, dict):
+                param_size = details.get('parameter_size', 'N/A')
+                quant = details.get('quantization_level', 'N/A')
+                family = details.get('family', 'N/A')
+                fmt = details.get('format', 'N/A')
+            else:
+                param_size = getattr(details, 'parameter_size', 'N/A')
+                quant = getattr(details, 'quantization_level', 'N/A')
+                family = getattr(details, 'family', 'N/A')
+                fmt = getattr(details, 'format', 'N/A')
+
+            table = Table(show_header=False, box=None)
+            table.add_column("Key", style="cyan", justify="right")
+            table.add_column("Value", style="white")
+
+            table.add_row("Model Name:", self.agent.model_name)
+            table.add_row("Family:", str(family))
+            table.add_row("Format:", str(fmt))
+            table.add_row("Parameters:", str(param_size))
+            table.add_row("Quantization:", str(quant))
+
+            if isinstance(model_info, dict):
+                arch = model_info.get("general.architecture", "N/A")
+                if arch != "N/A":
+                    table.add_row("Architecture:", str(arch))
+
+            panel = Panel(
+                table,
+                title=f"[bold]Model Info: {self.agent.model_name}[/bold]",
+                border_style="cyan",
+                expand=False
+            )
+            console.print(panel)
+        except Exception as e:
+            console.print(f"[red]Failed to get info for model '{self.agent.model_name}': {e}[/red]")
 
     async def _show_mcp(self):
         """Show all currently configured MCP servers and allow adding a new one."""
@@ -804,9 +1015,20 @@ class ChatCLI:
                     console.print("[dim]Chat history cleared.[/dim]")
                     continue
                 elif cmd_lower in ["/help", "/h"]:
-                    console.print("Commands: /help, /models, /tools, /newmodel, /mcp, /clear, /exit")
+                    console.print("\n[bold]Commands:[/bold]")
+                    console.print("  [cyan]/help[/cyan]      - Show this help message")
+                    console.print("  [cyan]/model[/cyan]     - Switch the active model")
+                    console.print("  [cyan]/tools[/cyan]     - List all available tools")
+                    console.print("  [cyan]/info[/cyan]      - View info/metadata about the current model")
+                    console.print("  [cyan]/analyze[/cyan]   - Analyze a specific file")
+                    console.print("  [cyan]/schedule[/cyan]  - Schedule a recurring prompt (natural language)")
+                    console.print("  [cyan]/newtask[/cyan]   - Create a new scheduled task interactively")
+                    console.print("  [cyan]/daemon[/cyan]    - Manage the background service (start/stop/status)")
+                    console.print("  [cyan]/clear[/cyan]     - Clear chat history")
+                    console.print("  [cyan]/exit[/cyan]      - Exit Superboof")
+                    console.print("\n[bold]Hidden Commands:[/bold] /newmodel, /mcp, /q, /c, /h, /m, /t, /n\n")
                     continue
-                elif cmd_lower in ["/models", "/m"]:
+                elif cmd_lower in ["/model", "/models", "/m"]:
                     models = await asyncio.to_thread(get_available_models)
                     selected_model = await select_model(models)
                     if selected_model and selected_model != self.agent.model_name:
@@ -823,6 +1045,42 @@ class ChatCLI:
                 elif cmd_lower in ["/newmodel", "/new", "/n"]:
                     cmd_arg = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
                     await self._search_and_install_model(cmd_arg)
+                    continue
+                elif cmd_lower == "/info":
+                    await self._show_info()
+                    continue
+                elif cmd_lower == "/analyze":
+                    filepath = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
+                    if not filepath:
+                        console.print("[red]Usage: /analyze <filepath>[/red]")
+                        continue
+                    if not os.path.isfile(filepath):
+                        console.print(f"[red]Error: File not found: {filepath}[/red]")
+                        continue
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            content = f.read(50000) # Read up to 50k characters
+                        analyze_prompt = f"Please analyze the following file (`{filepath}`):\n\n```\n{content}\n```"
+                        console.print(f"[dim]Injecting file contents of {filepath} for analysis...[/dim]")
+                        user_input = analyze_prompt
+                        # Fall through to let the agent process the prompt
+                    except Exception as e:
+                        console.print(f"[red]Failed to read file: {e}[/red]")
+                        continue
+                elif cmd_lower == "/daemon":
+                    arg = cmd_parts[1].strip().lower() if len(cmd_parts) > 1 else ""
+                    await self._manage_daemon(arg)
+                    continue
+                elif cmd_lower == "/newtask":
+                    await self._create_new_task()
+                    continue
+                elif cmd_lower == "/schedule":
+                    arg = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
+                    if not arg:
+                        console.print("[red]Usage: /schedule <natural language description>[/red]")
+                        console.print("[dim]Example: /schedule every day at 07:00 check the weather[/dim]")
+                        continue
+                    await self._schedule_natural_language(arg)
                     continue
 
                 # Check for direct tool execution via /<tool_name>
