@@ -1,0 +1,212 @@
+Screen {
+    background: #0f172a; /* Slate 900 */
+    color: #e2e8f0; /* Slate 200 */
+}
+
+/* Sidebar Styling */
+#sidebar {
+    width: 30;
+    background: #1e293b; /* Slate 800 */
+    border-right: solid #334155; /* Slate 700 */
+    padding: 1 2;
+    height: 100%;
+}
+
+.sidebar-header {
+    text-style: bold;
+    color: #38bdf8; /* Sky 400 */
+    margin-top: 1;
+    margin-bottom: 1;
+}
+
+#status-label {
+    text-align: center;
+    text-style: bold;
+    padding: 1 2;
+    width: 100%;
+    margin-bottom: 2;
+}
+
+.status-idle {
+    background: #334155;
+    color: #94a3b8;
+}
+
+.status-thinking {
+    background: #0369a1;
+    color: #f0f9ff;
+}
+
+.status-waiting {
+    background: #b45309;
+    color: #fef3c7;
+}
+
+.status-running {
+    background: #15803d;
+    color: #f0fdf4;
+}
+
+#sys-info {
+    color: #94a3b8;
+}
+
+#active-model-lbl {
+    margin-bottom: 2;
+    color: #10b981; /* Emerald */
+    text-style: bold;
+}
+
+/* Chat Area Styling */
+#main-chat {
+    width: 1fr;
+    height: 100%;
+    background: #0f172a;
+}
+
+#chat-history {
+    height: 1fr;
+    padding: 1 2;
+    overflow-y: scroll;
+}
+
+/* Messages */
+MessageWidget {
+    margin-top: 1;
+    margin-bottom: 1;
+    padding: 1 2;
+    border: tall transparent;
+}
+
+.msg-user {
+    background: #0f172a;
+    border: tall #334155;
+    margin-left: 10;
+    margin-right: 2;
+    border-right: solid #06b6d4; /* Cyan */
+}
+
+.msg-agent {
+    background: #1e293b;
+    border: tall #334155;
+    margin-left: 2;
+    margin-right: 10;
+    border-left: solid #10b981; /* Emerald */
+}
+
+.msg-system {
+    background: #090d16;
+    border: tall #1e293b;
+    margin-left: 6;
+    margin-right: 6;
+    color: #94a3b8;
+}
+
+.msg-title {
+    margin-bottom: 1;
+}
+
+.msg-content {
+    color: #e2e8f0;
+}
+
+/* Tool Request Box */
+.tool-request-box {
+    background: #1c1917; /* Very dark warm gray */
+    border: tall #ea580c; /* Orange border */
+    padding: 1 2;
+    margin-top: 1;
+    margin-bottom: 1;
+    margin-left: 6;
+    margin-right: 6;
+}
+
+.tool-request-title {
+    margin-bottom: 1;
+}
+
+.tool-actions {
+    margin-top: 1;
+    height: auto;
+    align: right middle;
+}
+
+.tool-actions Button {
+    margin-left: 2;
+}
+
+#cancel-btn {
+    width: 100%;
+    margin-bottom: 2;
+    background: #7f1d1d;
+    color: #fca5a5;
+    border: tall #b91c1c;
+}
+
+/* Chat Input Bar */
+#input-container {
+    height: 3;
+    background: #1e293b;
+    border-top: solid #334155;
+    padding: 0 1;
+}
+
+#chat-input {
+    width: 1fr;
+    border: none;
+    background: #1e293b;
+}
+
+#send-btn {
+    width: 10;
+}
+
+/* Dialog Screen Layouts */
+DirectoryPermissionScreen, ModelSelectionScreen, ModelLoadingScreen {
+    align: center middle;
+}
+
+#dialog-panel {
+    width: 60;
+    height: auto;
+    background: #1e293b;
+    border: thick #334155;
+    padding: 2;
+}
+
+.screen-title {
+    text-style: bold;
+    margin-bottom: 1;
+    text-align: center;
+}
+
+.screen-description {
+    margin-bottom: 2;
+    color: #94a3b8;
+}
+
+.screen-actions {
+    height: auto;
+    align: center middle;
+    margin-top: 1;
+}
+
+.screen-actions Button {
+    margin: 0 1;
+}
+
+#model-radios {
+    margin-bottom: 2;
+    border: tall #475569;
+    padding: 1;
+}
+
+.loading-subtext {
+    margin-bottom: 1;
+    color: #64748b;
+    text-align: center;
+}
+
+#loading-bar {
+    width: 100%;
+}
